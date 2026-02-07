@@ -16,6 +16,15 @@ fn main() {
     let _guard = event_handler.on_mouse_up(|button| {
         println!("Up: {:#?}", button);
     });
+    let _guard = event_handler.on_mouse_scroll(|event| {
+        use device_query::MouseScrollEvent;
+        match event {
+            MouseScrollEvent::VerticalUp => println!("Scroll Up"),
+            MouseScrollEvent::VerticalDown => println!("Scroll Down"),
+            MouseScrollEvent::HorizontalRight => println!("Scroll Right"),
+            MouseScrollEvent::HorizontalLeft => println!("Scroll Left"),
+        }
+    });
 
     loop {
         thread::sleep(Duration::from_secs(1000));

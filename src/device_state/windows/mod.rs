@@ -1,15 +1,65 @@
 use keymap::Keycode;
-use mouse_state::MouseState;
-use windows::Win32::Foundation::POINT;
+use mouse_state::{MouseState, ScrollDelta};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::thread;
+use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VIRTUAL_KEY};
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, SetWindowsHookExW, MSG,
+    MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_MOUSEWHEEL, WM_MOUSEHWHEEL,
+};
+
+// Global scroll accumulator
+static SCROLL_VERTICAL: AtomicI32 = AtomicI32::new(0);
+static SCROLL_HORIZONTAL: AtomicI32 = AtomicI32::new(0);
+static HOOK_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+fn init_mouse_hook() {
+    if HOOK_INITIALIZED.swap(true, Ordering::Relaxed) {
+        return; // Already initialized
+    }
+
+    thread::spawn(|| unsafe {
+        let _hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), None, 0)
+            .expect("Failed to install mouse hook");
+
+        // Message pump to keep the hook alive
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            DispatchMessageW(&msg);
+        }
+    });
+
+    // Give the hook thread time to initialize
+    thread::sleep(std::time::Duration::from_millis(10));
+}
+
+// Mouse hook procedure to capture scroll events
+unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let hook_struct = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+        match wparam.0 as u32 {
+            WM_MOUSEWHEEL => {
+                let delta = ((hook_struct.mouseData >> 16) as i16) / 120;
+                SCROLL_VERTICAL.fetch_add(delta as i32, Ordering::Relaxed);
+            }
+            WM_MOUSEHWHEEL => {
+                let delta = ((hook_struct.mouseData >> 16) as i16) / 120;
+                SCROLL_HORIZONTAL.fetch_add(delta as i32, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+    CallNextHookEx(None, code, wparam, lparam)
+}
 
 #[derive(Debug, Clone)]
 pub struct DeviceState;
 
 impl DeviceState {
     pub fn new() -> Self {
+        init_mouse_hook();
         Self {}
     }
 
@@ -43,6 +93,12 @@ impl DeviceState {
             button5pressed =
                 GetAsyncKeyState(KeyboardAndMouse::VK_XBUTTON2.0 as i32) as u32 & 0x8000 != 0;
         }
+        // Read and reset scroll delta atomically
+        let scroll_delta = ScrollDelta {
+            vertical: SCROLL_VERTICAL.swap(0, Ordering::Relaxed),
+            horizontal: SCROLL_HORIZONTAL.swap(0, Ordering::Relaxed),
+        };
+
         MouseState {
             coords,
             button_pressed: vec![
@@ -53,6 +109,7 @@ impl DeviceState {
                 button4pressed,
                 button5pressed,
             ],
+            scroll_delta,
         }
     }
 

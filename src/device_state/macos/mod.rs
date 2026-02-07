@@ -149,6 +149,7 @@ impl DeviceState {
         MouseState {
             coords: (x as i32, y as i32),
             button_pressed,
+            scroll_delta: Default::default(),
         }
     }
 

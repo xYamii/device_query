@@ -1,6 +1,7 @@
 //! Mouse callback.
 
 use crate::device_events::utils;
+use crate::mouse_state::MouseScrollEvent;
 use std::ops::DerefMut;
 use std::sync::{Arc, Mutex, Weak};
 use MouseButton;
@@ -12,12 +13,16 @@ pub type MouseMoveCallback = dyn Fn(&MousePosition) + Sync + Send + 'static;
 /// Mouse button callback.
 pub type MouseButtonCallback = dyn Fn(&MouseButton) + Sync + Send + 'static;
 
+/// Mouse scroll callback.
+pub type MouseScrollCallback = dyn Fn(&MouseScrollEvent) + Sync + Send + 'static;
+
 /// Mouse callbacks.
 #[derive(Default)]
 pub(crate) struct MouseCallbacks {
     pub mouse_move: Mutex<Vec<Weak<MouseMoveCallback>>>,
     pub mouse_up: Mutex<Vec<Weak<MouseButtonCallback>>>,
     pub mouse_down: Mutex<Vec<Weak<MouseButtonCallback>>>,
+    pub mouse_scroll: Mutex<Vec<Weak<MouseScrollCallback>>>,
 }
 
 impl MouseCallbacks {
@@ -76,6 +81,26 @@ impl MouseCallbacks {
             for callback in callbacks.iter() {
                 if let Some(callback) = callback.upgrade() {
                     callback(button);
+                }
+            }
+        }
+    }
+
+    pub fn push_mouse_scroll(&self, callback: Arc<MouseScrollCallback>) {
+        if let Ok(mut callbacks) = self.mouse_scroll.lock() {
+            let callback = Arc::downgrade(&callback);
+            callbacks.push(callback)
+        }
+    }
+
+    pub fn run_mouse_scroll(&self, event: &MouseScrollEvent) {
+        if let Ok(mut callbacks) = self.mouse_scroll.lock() {
+            utils::DrainFilter::drain_filter(callbacks.deref_mut(), |callback| {
+                callback.upgrade().is_none()
+            });
+            for callback in callbacks.iter() {
+                if let Some(callback) = callback.upgrade() {
+                    callback(event);
                 }
             }
         }

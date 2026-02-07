@@ -30,6 +30,7 @@ mod utils;
 
 use std::time::Duration;
 
+use crate::mouse_state::MouseScrollEvent;
 use crate::MousePosition;
 
 pub use self::callback::*;
@@ -63,6 +64,11 @@ pub trait DeviceEvents {
     ) -> CallbackGuard<Callback>;
     /// Register an on mouse button up event callback.
     fn on_mouse_up<Callback: Fn(&MouseButton) + Sync + Send + 'static>(
+        &self,
+        callback: Callback,
+    ) -> CallbackGuard<Callback>;
+    /// Register an on mouse scroll event callback.
+    fn on_mouse_scroll<Callback: Fn(&MouseScrollEvent) + Sync + Send + 'static>(
         &self,
         callback: Callback,
     ) -> CallbackGuard<Callback>;
@@ -126,5 +132,12 @@ impl DeviceEvents for DeviceEventsHandler {
         callback: Callback,
     ) -> CallbackGuard<Callback> {
         get_event_loop!().on_mouse_up(callback)
+    }
+
+    fn on_mouse_scroll<Callback: Fn(&MouseScrollEvent) + Sync + Send + 'static>(
+        &self,
+        callback: Callback,
+    ) -> CallbackGuard<Callback> {
+        get_event_loop!().on_mouse_scroll(callback)
     }
 }

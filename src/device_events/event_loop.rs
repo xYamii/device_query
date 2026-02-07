@@ -1,4 +1,5 @@
 use super::{CallbackGuard, KeyboardCallbacks};
+use crate::mouse_state::{MouseScrollEvent, ScrollDelta};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::thread::{sleep, spawn, JoinHandle};
 use std::time::Duration;
@@ -40,6 +41,7 @@ fn mouse_thread(callbacks: Weak<MouseCallbacks>, sleep_dur: Duration) -> JoinHan
     spawn(move || {
         let device_state = DeviceState::new();
         let mut previous_mouse_state = MouseState::default();
+        let mut accumulated_scroll = ScrollDelta::default();
         while let Some(callbacks) = callbacks.upgrade() {
             let mouse_state = device_state.get_mouse();
             for (index, (previous_state, current_state)) in previous_mouse_state
@@ -57,6 +59,32 @@ fn mouse_thread(callbacks: Weak<MouseCallbacks>, sleep_dur: Duration) -> JoinHan
             if mouse_state.coords != previous_mouse_state.coords {
                 callbacks.run_mouse_move(&mouse_state.coords);
             }
+
+            // Accumulate scroll delta
+            accumulated_scroll.vertical += mouse_state.scroll_delta.vertical;
+            accumulated_scroll.horizontal += mouse_state.scroll_delta.horizontal;
+
+            // Generate scroll events for accumulated deltas
+            if accumulated_scroll.vertical != 0 {
+                let event = if accumulated_scroll.vertical > 0 {
+                    MouseScrollEvent::VerticalUp
+                } else {
+                    MouseScrollEvent::VerticalDown
+                };
+                callbacks.run_mouse_scroll(&event);
+                accumulated_scroll.vertical = 0;
+            }
+
+            if accumulated_scroll.horizontal != 0 {
+                let event = if accumulated_scroll.horizontal > 0 {
+                    MouseScrollEvent::HorizontalRight
+                } else {
+                    MouseScrollEvent::HorizontalLeft
+                };
+                callbacks.run_mouse_scroll(&event);
+                accumulated_scroll.horizontal = 0;
+            }
+
             previous_mouse_state = mouse_state;
             sleep(sleep_dur);
         }
@@ -125,6 +153,15 @@ impl EventLoop {
     ) -> CallbackGuard<Callback> {
         let _callback = Arc::new(callback);
         self.mouse_callbacks.push_mouse_down(_callback.clone());
+        CallbackGuard { _callback }
+    }
+
+    pub fn on_mouse_scroll<Callback: Fn(&MouseScrollEvent) + Send + Sync + 'static>(
+        &mut self,
+        callback: Callback,
+    ) -> CallbackGuard<Callback> {
+        let _callback = Arc::new(callback);
+        self.mouse_callbacks.push_mouse_scroll(_callback.clone());
         CallbackGuard { _callback }
     }
 }

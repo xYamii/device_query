@@ -100,6 +100,7 @@ impl DeviceState {
         MouseState {
             coords: (win_x, win_y),
             button_pressed,
+            scroll_delta: Default::default(),
         }
     }
 
