@@ -2,7 +2,7 @@ extern crate x11;
 
 use self::x11::xlib;
 use keymap::Keycode;
-use mouse_state::MouseState;
+use mouse_state::{MouseState, ScrollDelta};
 use std::os::raw::c_char;
 use std::ptr;
 use std::rc::Rc;
@@ -87,6 +87,18 @@ impl DeviceState {
         let button4pressed = mask_return & xlib::Button4Mask > 0;
         let button5pressed = mask_return & xlib::Button5Mask > 0;
 
+        // In X11, buttons 4/5 are scroll up/down, buttons 6/7 are scroll left/right.
+        // Masks for buttons 6/7 are at bits 13/14.
+        const BUTTON6_MASK: u32 = 1 << 13;
+        const BUTTON7_MASK: u32 = 1 << 14;
+        let button6pressed = mask_return & BUTTON6_MASK > 0;
+        let button7pressed = mask_return & BUTTON7_MASK > 0;
+
+        let scroll_delta = ScrollDelta {
+            vertical: if button4pressed { 1 } else if button5pressed { -1 } else { 0 },
+            horizontal: if button7pressed { 1 } else if button6pressed { -1 } else { 0 },
+        };
+
         // Use 1-based indexing here so people can just query the button
         // number they're interested in directly.
         let button_pressed = vec![
@@ -100,7 +112,7 @@ impl DeviceState {
         MouseState {
             coords: (win_x, win_y),
             button_pressed,
-            scroll_delta: Default::default(),
+            scroll_delta,
         }
     }
 

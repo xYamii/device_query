@@ -1,7 +1,136 @@
 extern crate macos_accessibility_client;
 
 use keymap::Keycode;
-use mouse_state::MouseState;
+use mouse_state::{MouseState, ScrollDelta};
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
+use std::thread;
+
+#[allow(dead_code, non_camel_case_types)]
+mod cg_ffi {
+    use std::ffi::c_void;
+
+    pub type CGEventTapProxy = *mut c_void;
+    pub type CGEventRef = *mut c_void;
+    pub type CFMachPortRef = *mut c_void;
+    pub type CFRunLoopSourceRef = *mut c_void;
+    pub type CFRunLoopRef = *mut c_void;
+    pub type CFAllocatorRef = *const c_void;
+    pub type CFStringRef = *const c_void;
+
+    pub const K_CG_HID_EVENT_TAP: u32 = 0;
+    pub const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+    pub const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
+    pub const K_CG_EVENT_SCROLL_WHEEL: u32 = 22;
+    pub const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFFFFFE;
+    pub const K_CG_SCROLL_WHEEL_EVENT_DELTA_AXIS1: u32 = 11; // vertical
+    pub const K_CG_SCROLL_WHEEL_EVENT_DELTA_AXIS2: u32 = 12; // horizontal
+
+    pub type CGEventTapCallBack = unsafe extern "C" fn(
+        proxy: CGEventTapProxy,
+        event_type: u32,
+        event: CGEventRef,
+        user_info: *mut c_void,
+    ) -> CGEventRef;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        pub fn CGEventTapCreate(
+            tap: u32,
+            place: u32,
+            options: u32,
+            events_of_interest: u64,
+            callback: CGEventTapCallBack,
+            user_info: *mut c_void,
+        ) -> CFMachPortRef;
+        pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+        pub fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        pub fn CFMachPortCreateRunLoopSource(
+            allocator: CFAllocatorRef,
+            port: CFMachPortRef,
+            order: i64,
+        ) -> CFRunLoopSourceRef;
+        pub fn CFRunLoopGetCurrent() -> CFRunLoopRef;
+        pub fn CFRunLoopAddSource(
+            rl: CFRunLoopRef,
+            source: CFRunLoopSourceRef,
+            mode: CFStringRef,
+        );
+        pub fn CFRunLoopRun();
+        pub static kCFRunLoopCommonModes: CFStringRef;
+    }
+}
+use self::cg_ffi::*;
+
+// Global scroll accumulators
+static SCROLL_VERTICAL: AtomicI32 = AtomicI32::new(0);
+static SCROLL_HORIZONTAL: AtomicI32 = AtomicI32::new(0);
+static HOOK_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static EVENT_TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+unsafe extern "C" fn scroll_callback(
+    _proxy: CGEventTapProxy,
+    event_type: u32,
+    event: CGEventRef,
+    _user_info: *mut c_void,
+) -> CGEventRef {
+    if event_type == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT {
+        // Re-enable the tap if macOS disabled it due to timeout
+        let tap = EVENT_TAP.load(Ordering::Relaxed);
+        if !tap.is_null() {
+            CGEventTapEnable(tap, true);
+        }
+        return event;
+    }
+    if event_type == K_CG_EVENT_SCROLL_WHEEL {
+        let vertical =
+            CGEventGetIntegerValueField(event, K_CG_SCROLL_WHEEL_EVENT_DELTA_AXIS1) as i32;
+        let horizontal =
+            CGEventGetIntegerValueField(event, K_CG_SCROLL_WHEEL_EVENT_DELTA_AXIS2) as i32;
+        SCROLL_VERTICAL.fetch_add(vertical, Ordering::Relaxed);
+        SCROLL_HORIZONTAL.fetch_add(horizontal, Ordering::Relaxed);
+    }
+    event
+}
+
+fn init_scroll_hook() {
+    if HOOK_INITIALIZED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    thread::spawn(|| unsafe {
+        let event_mask: u64 = 1 << K_CG_EVENT_SCROLL_WHEEL;
+        let tap = CGEventTapCreate(
+            K_CG_HID_EVENT_TAP,
+            K_CG_HEAD_INSERT_EVENT_TAP,
+            K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+            event_mask,
+            scroll_callback,
+            std::ptr::null_mut(),
+        );
+        if tap.is_null() {
+            HOOK_INITIALIZED.store(false, Ordering::Relaxed);
+            return;
+        }
+        EVENT_TAP.store(tap, Ordering::Relaxed);
+
+        let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+        if source.is_null() {
+            HOOK_INITIALIZED.store(false, Ordering::Relaxed);
+            return;
+        }
+        let run_loop = CFRunLoopGetCurrent();
+        CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+        CFRunLoopRun();
+    });
+
+    // Give the hook thread time to initialize
+    thread::sleep(std::time::Duration::from_millis(10));
+}
 
 #[derive(Debug, Clone)]
 pub struct DeviceState;
@@ -124,12 +253,14 @@ impl DeviceState {
             "This app does not have Accessibility Permissions enabled and will not work"
         );
 
+        init_scroll_hook();
         DeviceState {}
     }
 
     /// returns `None` if app doesn't accessibility permissions.
     pub fn checked_new() -> Option<DeviceState> {
         if has_accessibility() {
+            init_scroll_hook();
             Some(DeviceState {})
         } else {
             None
@@ -146,10 +277,16 @@ impl DeviceState {
             false,
         ];
 
+        // Read and reset scroll delta atomically
+        let scroll_delta = ScrollDelta {
+            vertical: SCROLL_VERTICAL.swap(0, Ordering::Relaxed),
+            horizontal: SCROLL_HORIZONTAL.swap(0, Ordering::Relaxed),
+        };
+
         MouseState {
             coords: (x as i32, y as i32),
             button_pressed,
-            scroll_delta: Default::default(),
+            scroll_delta,
         }
     }
 
